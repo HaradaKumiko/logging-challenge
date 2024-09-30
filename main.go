@@ -18,23 +18,27 @@ import (
 )
 
 var (
-	reqCountProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
+	register = prometheus.NewRegistry()
+	
+	reqCountProcessed = promauto.With(register).NewCounterVec(prometheus.CounterOpts{
 			Name: "http_request_count",
 			Help: "The total number of processed by handler",
 	}, []string{"method", "endpoint"} )
 )
 
+
+
 func main() {
 	http.HandleFunc("/", handler)
 	http.HandleFunc("/another", anotherHandler)
-	http.Handle("/metrics", promhttp.Handler())
+	http.Handle("/metrics", promhttp.HandlerFor(register, promhttp.HandlerOpts{}))
 
 	err := os.MkdirAll("logs", os.ModePerm)
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to create logs directory")
 	}
 
-	lf, err := os.OpenFile(
+	lf, err := os.OpenFile(	
 		"logs/app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666,
 	)
 	if err != nil {
