@@ -12,28 +12,65 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/prometheus"
+	otelmetric "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
-var (
-	register = prometheus.NewRegistry()
-	
-	reqCountProcessed = promauto.With(register).NewCounterVec(prometheus.CounterOpts{
-			Name: "http_request_count",
-			Help: "The total number of processed by handler",
-	}, []string{"method", "endpoint"} )
-)
-
+var meter otelmetric.Meter
+var reqHistogram otelmetric.Float64Histogram
 
 
 func main() {
-	http.HandleFunc("/", handler)
-	http.HandleFunc("/another", anotherHandler)
-	http.Handle("/metrics", promhttp.HandlerFor(register, promhttp.HandlerOpts{}))
 
-	err := os.MkdirAll("logs", os.ModePerm)
+	ctx := context.Background()
+	resourceOtel, err := resource.New(ctx, 
+		resource.WithAttributes(semconv.ServiceNameKey.String("logging-challange")))
+
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to create resource otel")
+	}
+
+	exporter, err := prometheus.New()
+
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to create exporter")
+	}
+
+ 
+	metricProvider := metric.NewMeterProvider(
+		metric.WithResource(resourceOtel),
+		metric.WithReader(exporter),
+	)
+
+	otel.SetMeterProvider(metricProvider)
+
+	meter = otel.Meter("logging-challange-code")
+
+	reqHistogram, err = meter.Float64Histogram("http_request_duration_miliseconds", 
+		otelmetric.WithUnit("miliseconds"),
+		otelmetric.WithDescription("service latency"),
+		otelmetric.WithExplicitBucketBoundaries([]float64{10, 50, 100, 200, 500, 1000}...))	
+
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to create measurement meter")
+	}
+
+
+
+	http.Handle("/", otelhttp.WithRouteTag("/", http.HandlerFunc(handler)))
+	http.Handle("/another", otelhttp.WithRouteTag("/another", http.HandlerFunc(anotherHandler)))
+	http.Handle("/metrics", otelhttp.WithRouteTag("/metrics", promhttp.Handler()))
+
+	otelHandler := otelhttp.NewHandler(http.DefaultServeMux, "server")
+
+	err = os.MkdirAll("logs", os.ModePerm)
 	if err != nil {
 		log.Fatal().Err(err).Msg("unable to create logs directory")
 	}
@@ -50,14 +87,14 @@ func main() {
 	log.Logger = zerolog.New(multiWriters).With().Timestamp().Logger()
 
 	log.Info().Msg("Starting server on :8080")
-	err = http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8080", otelhttp.NewHandler(otelHandler, "/"))
 	if err != nil {
 		log.Fatal().Err(err).Msg("Server failed to start")
 	}
+
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	reqCountProcessed.With(prometheus.Labels{"method": r.Method, "endpoint": r.URL.Path}).Inc()
 
 	startElapsedTime := time.Now()
 	if r.URL.Path == "/favicon.ico" {
@@ -82,15 +119,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello, %q", html.EscapeString(r.URL.Path))
 
 	endElapsedTime := time.Since(startElapsedTime)
+	elapsed_ms := float64(endElapsedTime.Nanoseconds()/10000000)
 
 	log.Info().Ctx(ctx).
-		Float64("elapsed_ms", float64(endElapsedTime.Nanoseconds()/10000000)).
+		Float64("elapsed_ms", elapsed_ms).
 		Msg("request processed")
 
+	reqHistogram.Record(ctx, elapsed_ms, otelmetric.WithAttributes(
+		attribute.String("url", r.URL.String()),
+	))
 }
 
+
+
 func anotherHandler(w http.ResponseWriter, r *http.Request){
-	reqCountProcessed.With(prometheus.Labels{"method": r.Method, "endpoint": r.URL.Path}).Inc()
 	startElapsedTime := time.Now()
 	log := log.With().
 		Str("trace_id", uuid.NewString()).
@@ -107,11 +149,17 @@ func anotherHandler(w http.ResponseWriter, r *http.Request){
 		Msg("request received")
 
 	endElapsedTime := time.Since(startElapsedTime)
+	elapsed_ms := float64(endElapsedTime.Nanoseconds()/10000000)
 
 	fmt.Fprintf(w, "another handler")
+
 	log.Info().Ctx(ctx).
 		Float64("elapsed_ms", float64(endElapsedTime.Nanoseconds()/10000000)).
 		Msg("request processed")
+
+	reqHistogram.Record(ctx, elapsed_ms, otelmetric.WithAttributes(
+		attribute.String("url", "/handler"),
+	))
 }
 
 func doFirst(ctx context.Context) {

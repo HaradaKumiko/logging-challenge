@@ -13,7 +13,7 @@ services:
     image: prom/prometheus:latest
     volumes:
       - ./scripts/prometheus:/etc/prometheus
-      - prometheus_data:/prometheus'
+      - prometheus_data:/prometheus
     ports:
       - 9090:9090
     command:
@@ -49,6 +49,25 @@ services:
     volumes: 
     - ./scripts/loki:/etc/loki
     command: -config.file=/etc/loki/config.yaml
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_ZIPKIN_HOST_PORT: 9411
+    expose:
+      - "16686"
+    ports:
+      - 16686:16686
+      - 4317:4317
+      - 4318:4318
+    command: 
+      - "--memory.max-traces"
+      - "1000"
+      - "--collector.otlp.grpc.host-port"
+      - ":4317"
+      - "--collector.otlp.http.host-port"
+      - ":4318"
+    restart: always
 
   node_exporter:
     image: quay.io/prometheus/node-exporter:latest  
